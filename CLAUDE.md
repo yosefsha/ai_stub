@@ -10,6 +10,8 @@ See [docs/coding-instructions.md](docs/coding-instructions.md) for full coding s
 
 All configuration below is production-grade. Infrastructure is defined as code using **AWS CDK (Python)**.
 
+> Note: this repo is a stub — `cdk.json` (the file that points the CDK CLI at `infra/app.py` and is required for any `cdk` command, e.g. `cdk synth`/`deploy`/`destroy`) does not exist yet. Add it before running CDK commands against a real project.
+
 ### CDK Project Structure
 ```
 infra/
