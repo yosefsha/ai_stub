@@ -1,5 +1,9 @@
 # Coding Instructions
 
+## General
+
+- All configuration must be production-ready standard — no placeholder values, TODO stubs, or "good enough for now" defaults. Every config entry should be deployable to production as-is.
+
 ## Python / FastAPI
 
 ### Project Structure
