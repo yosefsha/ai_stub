@@ -15,9 +15,13 @@ The project folder is always created at DEFAULT_PROJECTS_DIR/<name>
 (/Users/yosefshachnovsky/dev/<name>) — the folder name always matches the
 repo name.
 
+Infrastructure (the `infra/` folder and the infrastructure section of
+CLAUDE.md) is excluded by default; pass --infra to include it.
+
 Usage:
     python scripts/create_remote_project.py my-new-project
     python scripts/create_remote_project.py my-new-project --public
+    python scripts/create_remote_project.py my-new-project --infra
 """
 
 import argparse
@@ -56,6 +60,11 @@ def main() -> None:
         action="store_true",
         help="Also copy this repo's .git directory (excluded by default)",
     )
+    parser.add_argument(
+        "--infra",
+        action="store_true",
+        help="Include infra/ and the infrastructure section of CLAUDE.md (excluded by default)",
+    )
     args = parser.parse_args()
 
     check_gh_ready()
@@ -74,7 +83,7 @@ def main() -> None:
         sys.exit(f"Destination '{destination}' already exists and is not empty.")
 
     print(f"Creating project folder: {destination}")
-    copy_repo(destination, include_git=args.include_git)
+    copy_repo(destination, include_git=args.include_git, include_infra=args.infra)
 
     print("Initializing git repo and creating initial commit...")
     run(["git", "init", "-b", "main"], cwd=destination)
