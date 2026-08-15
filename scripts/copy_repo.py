@@ -5,8 +5,9 @@ The destination may already exist (e.g. an existing project root) or not
 (it will be created). Files/folders are merged into the destination,
 overwriting any same-named files that already exist there.
 
-Infrastructure (the `infra/` folder and the infrastructure section of
-CLAUDE.md) is excluded by default; pass --infra to include it.
+Infrastructure (the `infra/` folder, `docs/infra-instructions.md`, and the
+CLAUDE.md section importing it) is excluded by default; pass --infra to
+include it.
 
 Usage:
     python scripts/copy_repo.py /path/to/destination
@@ -29,23 +30,25 @@ DEFAULT_EXCLUDES = {
     ".venv",
 }
 
-# Top-level paths dropped unless --infra is passed.
-INFRA_EXCLUDES = {"infra"}
-
-# A `## ` heading containing this word starts the infra section of CLAUDE.md.
-INFRA_HEADING_KEYWORD = "infrastructure"
+# Paths (relative to the repo root) dropped unless --infra is passed.
+INFRA_DOC = "docs/infra-instructions.md"
+INFRA_EXCLUDES = {"infra", INFRA_DOC}
 
 
-def strip_infra_section(text: str) -> str:
-    """Drop the `## Infrastructure...` section (and its subsections) from a
-    markdown document. The section runs until the next `## ` heading or EOF."""
-    kept: list[str] = []
-    skipping = False
+def strip_section_importing(text: str, doc_path: str) -> str:
+    """Drop the `## ` section of a markdown document that imports `doc_path`.
+
+    Anchored on the import path rather than the heading text, so renaming the
+    heading can't silently break the exclusion. The section runs from its `## `
+    heading to the next `## ` heading or EOF.
+    """
+    sections: list[list[str]] = [[]]
     for line in text.splitlines(keepends=True):
         if line.startswith("## "):
-            skipping = INFRA_HEADING_KEYWORD in line.lower()
-        if not skipping:
-            kept.append(line)
+            sections.append([])
+        sections[-1].append(line)
+
+    kept = ["".join(s) for s in sections if doc_path not in "".join(s)]
     return "".join(kept).rstrip("\n") + "\n"
 
 
@@ -55,10 +58,18 @@ def copy_repo(destination: Path, include_git: bool = False, include_infra: bool 
         excludes.discard(".git")
 
     def ignore(dir_path: str, names: list[str]) -> set[str]:
-        skip = set(excludes)
-        if not include_infra and Path(dir_path).resolve() == REPO_ROOT:
-            skip |= INFRA_EXCLUDES
-        return {name for name in names if name in skip}
+        try:
+            rel = Path(dir_path).resolve().relative_to(REPO_ROOT)
+        except ValueError:
+            rel = Path(".")
+        skipped = set()
+        for name in names:
+            rel_name = (rel / name).as_posix().removeprefix("./")
+            if name in excludes:
+                skipped.add(name)
+            elif not include_infra and rel_name in INFRA_EXCLUDES:
+                skipped.add(name)
+        return skipped
 
     destination.mkdir(parents=True, exist_ok=True)
     shutil.copytree(REPO_ROOT, destination, ignore=ignore, dirs_exist_ok=True)
@@ -67,7 +78,7 @@ def copy_repo(destination: Path, include_git: bool = False, include_infra: bool 
         claude_md = destination / "CLAUDE.md"
         if claude_md.exists():
             original = claude_md.read_text()
-            stripped = strip_infra_section(original)
+            stripped = strip_section_importing(original, INFRA_DOC)
             if stripped != original:
                 claude_md.write_text(stripped)
 
@@ -83,7 +94,7 @@ def main() -> None:
     parser.add_argument(
         "--infra",
         action="store_true",
-        help="Include infra/ and the infrastructure section of CLAUDE.md (excluded by default)",
+        help=f"Include infra/, {INFRA_DOC} and its CLAUDE.md section (excluded by default)",
     )
     args = parser.parse_args()
 

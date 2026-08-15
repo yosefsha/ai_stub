@@ -9,8 +9,14 @@ STAGING_CONFIG = {
     "backend_desired_count": 1,
     "backend_min_tasks": 1,
     "backend_max_tasks": 4,
+    # Scopes the OIDC trust policy in deploy_stack.py: only workflow runs from
+    # this repo, on this branch, in this GitHub environment may assume the
+    # deploy role.
     "github_owner": "REPLACE_WITH_GITHUB_OWNER",
     "github_repo": "REPLACE_WITH_GITHUB_REPO",
-    "github_branch": "main",
-    "codestar_connection_arn": "REPLACE_WITH_CODESTAR_CONNECTION_ARN",
+    "deploy_branch": "main",
+    "github_environment": "staging",
+    # Set once staging and prod share an account — the OIDC provider is
+    # account-wide, so the second stack must reference it rather than create it.
+    "github_oidc_provider_arn": None,
 }

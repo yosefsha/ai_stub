@@ -76,6 +76,10 @@ src/
 - Use CSS Grid or Flexbox via inline styles unless a CSS framework is adopted.
 
 ### Build & Lint
+`package.json` must define all four scripts — CI calls them by name and does not
+know which framework or toolchain sits behind them.
 - `npm run dev` — Vite dev server with HMR.
-- `npm run build` — Type-check (`tsc -b`) then Vite production build.
-- `npm run lint` — ESLint.
+- `npm run build` — type-check then Vite production build.
+- `npm run type-check` — the type-checker for this project (`tsc -b`, `vue-tsc -b`, …). CI runs it as its own gate so a type error is reported as one.
+- `npm run lint` — ESLint, and it must carry `--max-warnings 0`. Recommended presets ship most rules as warnings; without the flag the CI lint gate can never fail.
+- `npm run test` — the unit test suite.

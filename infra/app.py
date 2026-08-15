@@ -4,10 +4,14 @@ from cdk_nag import AwsSolutionsChecks
 
 from config.prod import PROD_CONFIG
 from config.staging import STAGING_CONFIG
-from stacks.network_stack import NetworkStack
-from stacks.backend_stack import BackendStack
+from stacks.backend_stack import (
+    BACKEND_CONTAINER_NAME,
+    MIGRATION_CONTAINER_NAME,
+    BackendStack,
+)
+from stacks.deploy_stack import DeployStack
 from stacks.frontend_stack import FrontendStack
-from stacks.pipeline_stack import PipelineStack
+from stacks.network_stack import NetworkStack
 
 app = cdk.App()
 
@@ -31,11 +35,26 @@ backend = BackendStack(
 
 frontend = FrontendStack(app, f"{target_env}-frontend", env=aws_env, env_config=env_config)
 
-PipelineStack(
+# CI/CD is GitHub Actions (.github/workflows/). This stack carries no build
+# logic — only the OIDC role those workflows assume and the outputs they read.
+# The stack name is a contract: deploy.yml looks up `<env>-deploy`.
+DeployStack(
     app,
-    "ci-cd-pipeline",
+    f"{target_env}-deploy",
     env=aws_env,
     env_config=env_config,
+    ecr_repo=backend.ecr_repo,
+    cluster=backend.cluster,
+    service=backend.service.service,
+    backend_task_definition=backend.service.task_definition,
+    backend_container_name=BACKEND_CONTAINER_NAME,
+    migration_task_definition=backend.migration_task_definition,
+    migration_container_name=MIGRATION_CONTAINER_NAME,
+    deploy_subnet_ids=backend.deploy_subnet_ids,
+    deploy_security_group_id=backend.deploy_security_group.security_group_id,
+    deploy_assign_public_ip=backend.deploy_assign_public_ip,
+    frontend_bucket=frontend.bucket,
+    distribution=frontend.distribution,
 )
 
 cdk.Aspects.of(app).add(AwsSolutionsChecks())

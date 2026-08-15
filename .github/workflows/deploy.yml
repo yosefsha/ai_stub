@@ -1,0 +1,422 @@
+name: Deploy
+
+# Deploys the application to AWS. This is the deployment path — there is no
+# CodePipeline or CodeBuild.
+#
+# Nothing here holds an AWS credential. `permissions.id-token: write` lets the job
+# ask GitHub for a short-lived OIDC token; IAM checks its claims against the trust
+# policy in `infra/stacks/deploy_stack.py` and STS returns credentials that expire
+# with the job.
+#
+# A first run needs, in order: `cdk deploy` of the stacks (the role this assumes
+# does not exist until then), the repository variables AWS_ACCOUNT_ID, AWS_REGION
+# and SERVICE_NAME, and the GitHub environments `production` and `staging` with
+# their required reviewers and deployment-branch policies configured.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Which environment to deploy
+        type: choice
+        options:
+          - production
+          - staging
+        default: production
+
+# One deploy per environment at a time, and never cancelled halfway: a cancelled
+# run can leave a registered task definition that no service points at, or a
+# migration that applied while the service still runs the previous image.
+concurrency:
+  group: deploy-${{ inputs.target || 'production' }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  # Required for OIDC. Without it `configure-aws-credentials` has no token to
+  # exchange and fails with "Credentials could not be loaded".
+  id-token: write
+
+# Explicit `bash`, which GitHub runs as `bash -e -o pipefail`, matching ci.yml.
+defaults:
+  run:
+    shell: bash
+
+env:
+  # Both mirror `infra/config/<env>.py`. They are repository variables rather than
+  # literals so that a fork or a second account does not need this file edited,
+  # and they are `vars`, not `secrets`: neither an account id nor a region is a
+  # credential, and putting them in secrets only makes the logs unreadable.
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  SERVICE_NAME: ${{ vars.SERVICE_NAME || 'myapp' }}
+
+jobs:
+  # --------------------------------------------------------------------------
+  # Nothing deploys unless this job passes.
+  # --------------------------------------------------------------------------
+  gate:
+    name: Gate — CI green, target resolved
+    runs-on: ubuntu-latest
+    # A `workflow_dispatch` can be started from any branch. Deploying one would
+    # ship code that never merged, so the whole workflow stops here — every other
+    # job needs this one, and a skipped dependency skips its dependents.
+    #
+    # This is a convenience, not a control: it lives in a file that a branch can
+    # edit. The control is the GitHub environment's deployment-branch policy,
+    # which is a repository setting a human has to configure.
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      # `gh api .../actions/workflows/ci.yml/runs` needs it. Job-level
+      # permissions replace the workflow-level block outright, so `id-token` is
+      # deliberately absent here: this job assumes no role.
+      actions: read
+    outputs:
+      github_environment: ${{ steps.target.outputs.github_environment }}
+      aws_env: ${{ steps.target.outputs.aws_env }}
+      role_arn: ${{ steps.target.outputs.role_arn }}
+
+    steps:
+      - name: Resolve the deployment target
+        id: target
+        env:
+          # Through `env` rather than interpolated straight into the script: an
+          # input is untrusted text, and `${{ }}` inside a `run:` block is pasted
+          # in before bash ever sees it.
+          TARGET: ${{ inputs.target || 'production' }}
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+        run: |
+          case "$TARGET" in
+            production) aws_env=prod ;;
+            staging)    aws_env=staging ;;
+            *) echo "::error::Unknown deployment target '$TARGET'."; exit 1 ;;
+          esac
+
+          if [ -z "$AWS_ACCOUNT_ID" ]; then
+            echo "::error::Repository variable AWS_ACCOUNT_ID is not set. It is the" \
+                 "account the CDK stacks were deployed into — see infra/config/."
+            exit 1
+          fi
+
+          # The role name is fixed in deploy_stack.py precisely so it can be
+          # constructed here: the workflow has no credentials with which to look
+          # anything up until after it has assumed this role.
+          {
+            echo "github_environment=$TARGET"
+            echo "aws_env=$aws_env"
+            echo "role_arn=arn:aws:iam::${AWS_ACCOUNT_ID}:role/${SERVICE_NAME}-${aws_env}-github-actions-deploy"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Deploying $GITHUB_SHA to $TARGET (CDK stacks: ${aws_env}-*)."
+
+      - name: Require CI to be green for this commit
+        # The test gate is ci.yml, and it is not repeated here. Re-running ruff,
+        # pytest, the frontend lint, type-check and tests, and both image builds,
+        # would double the wait for every deploy and could only ever agree with
+        # the run that already happened on this exact SHA. A pipeline outside
+        # GitHub had to re-run them because it could not see GitHub's result;
+        # this job can just ask.
+        #
+        # It waits rather than reading once: on a push to main this workflow and
+        # ci.yml start together, so the CI run is usually still in progress when
+        # we look.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          deadline=$(( SECONDS + 45 * 60 ))
+
+          while :; do
+            result=$(gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${GITHUB_SHA}&per_page=1" \
+              --jq '"\(.workflow_runs[0].status // "missing") \(.workflow_runs[0].conclusion // "none")"' \
+              || echo "unreachable none")
+            read -r status conclusion <<< "$result"
+
+            if [ "$status" = "completed" ]; then
+              if [ "$conclusion" = "success" ]; then
+                echo "CI passed for ${GITHUB_SHA}."
+                exit 0
+              fi
+              echo "::error::CI concluded '${conclusion}' for ${GITHUB_SHA}. Refusing to deploy."
+              exit 1
+            fi
+
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::error::Timed out waiting for CI on ${GITHUB_SHA} (last seen: ${status})."
+              exit 1
+            fi
+
+            echo "CI is '${status}' for ${GITHUB_SHA}; waiting."
+            sleep 30
+          done
+
+  # --------------------------------------------------------------------------
+  # Backend and frontend deploy independently. Neither `needs` the other, so a
+  # failed frontend build does not hold back an API fix, and vice versa.
+  # --------------------------------------------------------------------------
+  backend:
+    name: Backend — image, migration, service
+    needs: gate
+    runs-on: ubuntu-latest
+    # Where the human gate lives. The required-reviewer rule is a property of the
+    # GitHub environment, not of this file: declaring the environment is what
+    # makes the job wait for it, but the rule itself has to be configured in
+    # repository settings. Until someone does, this deploys unattended.
+    environment: ${{ needs.gate.outputs.github_environment }}
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Assume the deploy role
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ needs.gate.outputs.role_arn }}
+          aws-region: ${{ env.AWS_REGION }}
+          # Shows up in CloudTrail as the caller identity, so an API call can be
+          # traced back to the run that made it.
+          role-session-name: gha-backend-${{ github.run_id }}
+
+      - name: Read the deploy stack's outputs
+        id: ctx
+        env:
+          STACK_NAME: ${{ needs.gate.outputs.aws_env }}-deploy
+        run: |
+          outputs=$(aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" --query 'Stacks[0].Outputs' --output json)
+
+          # `jq -e` exits non-zero when the key is absent, and a failed command
+          # substitution in an assignment trips `set -e`. So a renamed CfnOutput
+          # fails here, loudly, rather than deploying with an empty cluster name.
+          get() { jq -er --arg k "$1" '.[] | select(.OutputKey == $k) | .OutputValue' <<< "$outputs"; }
+
+          ecr_repository_uri=$(get EcrRepositoryUri)
+          cluster=$(get EcsClusterName)
+          service=$(get EcsServiceName)
+          backend_family=$(get BackendTaskDefinitionFamily)
+          backend_container=$(get BackendContainerName)
+          migration_family=$(get MigrationTaskDefinitionFamily)
+          migration_container=$(get MigrationContainerName)
+          subnets=$(get DeploySubnetIds)
+          security_group=$(get DeploySecurityGroupId)
+          assign_public_ip=$(get DeployAssignPublicIp)
+
+          {
+            echo "ecr_repository_uri=$ecr_repository_uri"
+            echo "image=${ecr_repository_uri}:${GITHUB_SHA}"
+            echo "cluster=$cluster"
+            echo "service=$service"
+            echo "backend_family=$backend_family"
+            echo "backend_container=$backend_container"
+            echo "migration_family=$migration_family"
+            echo "migration_container=$migration_container"
+            echo "subnets=$subnets"
+            echo "security_group=$security_group"
+            echo "assign_public_ip=$assign_public_ip"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Log in to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push the image
+        env:
+          ECR_REPOSITORY_URI: ${{ steps.ctx.outputs.ecr_repository_uri }}
+        run: |
+          # Tagged with the commit SHA, which is what every step below deploys:
+          # a task definition pinned to an immutable tag makes a rollback a
+          # redeploy of a known revision rather than a race with whatever
+          # `latest` points at.
+          #
+          # `latest` is pushed as well, and only as a bootstrap: backend_stack.py
+          # renders both task definitions against `<repo>:latest` so that a brand
+          # new environment has something to pull before this workflow has ever
+          # run.
+          docker build --pull \
+            -t "${ECR_REPOSITORY_URI}:${GITHUB_SHA}" \
+            -t "${ECR_REPOSITORY_URI}:latest" \
+            backend
+          docker push "${ECR_REPOSITORY_URI}:${GITHUB_SHA}"
+          docker push "${ECR_REPOSITORY_URI}:latest"
+
+      # ----------------------------------------------------------------------
+      # Migration. This is the step that answers the one thing CodeBuild could do
+      # that a GitHub-hosted runner cannot: run inside the VPC. RDS is in private
+      # subnets and admits only the ECS task security group, so `alembic upgrade
+      # head` runs as a one-off Fargate task in that group — from the image just
+      # built — rather than from the runner.
+      # ----------------------------------------------------------------------
+      - name: Fetch the migration task definition
+        env:
+          FAMILY: ${{ steps.ctx.outputs.migration_family }}
+        run: |
+          aws ecs describe-task-definition --task-definition "$FAMILY" \
+            --query taskDefinition > migration-task-definition.json
+
+      - name: Pin the migration task definition to this commit's image
+        id: migration-taskdef
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: migration-task-definition.json
+          container-name: ${{ steps.ctx.outputs.migration_container }}
+          image: ${{ steps.ctx.outputs.image }}
+
+      - name: Run alembic upgrade head as a one-off ECS task
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.migration-taskdef.outputs.task-definition }}
+          cluster: ${{ steps.ctx.outputs.cluster }}
+          # No `service:` — this step registers the revision and runs it, and
+          # updates nothing. The service is updated by the next step, and only if
+          # this one succeeded.
+          run-task: true
+          run-task-launch-type: FARGATE
+          # `aws ecs run-task` returning 200 means the task was *accepted*.
+          # `wait-for-task-stopped` is what makes the action poll until it stops
+          # and then read every container's exit code, failing the job on any
+          # non-zero one. Without it a migration that raised would be reported as
+          # a successful deploy, and the service would roll out on a schema that
+          # was never brought to head.
+          wait-for-task-stopped: true
+          wait-for-minutes: 20
+          # A task launched outside a service inherits no networking, so the VPC
+          # configuration is explicit. These are the same subnets and the same
+          # security group the service's tasks use — the only source the RDS
+          # ingress rule in backend_stack.py admits.
+          run-task-subnets: ${{ steps.ctx.outputs.subnets }}
+          run-task-security-groups: ${{ steps.ctx.outputs.security_group }}
+          # ENABLED, and read from the stack rather than written here. The VPC
+          # has no NAT Gateway (removed for cost — see network_stack.py), so
+          # these are public subnets and a task in one without a public IP has
+          # no route to ECR: it never pulls its image, never runs `alembic`, and
+          # stops with a CannotPullContainerError that the step below reports as
+          # a missing exit code. Restoring a NAT Gateway flips this in one place.
+          run-task-assign-public-IP: ${{ steps.ctx.outputs.assign_public_ip }}
+          run-task-started-by: gha-${{ github.run_id }}
+          # The definition already carries this command; repeating it here keeps
+          # what runs before a production deploy visible at the call site rather
+          # than only in the CDK.
+          run-task-container-overrides: '[{"name": "${{ steps.ctx.outputs.migration_container }}", "command": ["alembic", "upgrade", "head"]}]'
+
+      # ----------------------------------------------------------------------
+      # Service. Only reached if the migration container exited 0.
+      # ----------------------------------------------------------------------
+      - name: Fetch the service task definition
+        env:
+          FAMILY: ${{ steps.ctx.outputs.backend_family }}
+        run: |
+          aws ecs describe-task-definition --task-definition "$FAMILY" \
+            --query taskDefinition > service-task-definition.json
+
+      - name: Pin the service task definition to this commit's image
+        id: service-taskdef
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: service-task-definition.json
+          # Only the application container is re-imaged; the X-Ray daemon
+          # sidecar keeps its own public.ecr.aws image.
+          container-name: ${{ steps.ctx.outputs.backend_container }}
+          image: ${{ steps.ctx.outputs.image }}
+
+      - name: Deploy the new revision to the ECS service
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.service-taskdef.outputs.task-definition }}
+          service: ${{ steps.ctx.outputs.service }}
+          cluster: ${{ steps.ctx.outputs.cluster }}
+          # A new revision pinned to the SHA, not `--force-new-deployment` on a
+          # floating tag: rolling back is then `aws ecs update-service
+          # --task-definition <family>:<revision>` on a revision whose contents
+          # are known, rather than a re-push and a hope.
+          #
+          # Waiting matters because backend_stack.py enables the deployment
+          # circuit breaker with rollback: a release whose tasks never pass
+          # /health is rolled back by ECS, and without this the job would go green
+          # while the service quietly reverted.
+          wait-for-service-stability: true
+          wait-for-minutes: 20
+
+  frontend:
+    name: Frontend — build, sync, invalidate
+    needs: gate
+    runs-on: ubuntu-latest
+    environment: ${{ needs.gate.outputs.github_environment }}
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          # Matches the `node:22-alpine` base in frontend/Dockerfile and the
+          # version ci.yml builds against.
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Lint (eslint)
+        working-directory: frontend
+        # Kept even though ci.yml lints the same commit: unlike the test suite it
+        # costs seconds, and this is the build whose output is actually shipped.
+        run: npm run lint
+
+      - name: Build
+        working-directory: frontend
+        # `npm run build` type-checks first, so a type error fails here rather
+        # than shipping.
+        run: npm run build
+
+      - name: Assume the deploy role
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ needs.gate.outputs.role_arn }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gha-frontend-${{ github.run_id }}
+
+      - name: Read the deploy stack's outputs
+        id: ctx
+        env:
+          STACK_NAME: ${{ needs.gate.outputs.aws_env }}-deploy
+        run: |
+          outputs=$(aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" --query 'Stacks[0].Outputs' --output json)
+          get() { jq -er --arg k "$1" '.[] | select(.OutputKey == $k) | .OutputValue' <<< "$outputs"; }
+
+          bucket=$(get FrontendBucketName)
+          distribution=$(get CloudFrontDistributionId)
+
+          {
+            echo "bucket=$bucket"
+            echo "distribution=$distribution"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Sync the built SPA to S3
+        env:
+          BUCKET: ${{ steps.ctx.outputs.bucket }}
+        # `--delete` removes objects the new build no longer produces. Vite emits
+        # content-hashed filenames, so this deletes the *previous* build's assets
+        # — a visitor who loaded the old index.html seconds earlier can 404 on a
+        # chunk until they reload. Accepted, and it is why index.html is served
+        # with caching disabled: the window is one request wide.
+        run: aws s3 sync frontend/dist/ "s3://${BUCKET}/" --delete
+
+      - name: Invalidate the CloudFront cache
+        env:
+          DISTRIBUTION_ID: ${{ steps.ctx.outputs.distribution }}
+        # index.html is on CACHING_DISABLED and /assets/* is content-hashed, so
+        # strictly this changes nothing today. It stays because it is the one
+        # step that would matter the moment a cache policy gains a TTL, and
+        # because "deployed" should mean the edge is serving the new build — the
+        # wait is what makes that true rather than merely requested.
+        run: |
+          invalidation_id=$(aws cloudfront create-invalidation \
+            --distribution-id "$DISTRIBUTION_ID" --paths '/*' \
+            --query 'Invalidation.Id' --output text)
+          aws cloudfront wait invalidation-completed \
+            --distribution-id "$DISTRIBUTION_ID" --id "$invalidation_id"
