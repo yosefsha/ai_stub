@@ -36,6 +36,37 @@ What CI needs from each, beyond the files existing:
 Building only one of the two services is a change to `ci.yml` — delete the job
 you don't need rather than leaving it red.
 
+## Repository Setup (GitHub)
+
+Files alone are not enough — two of the three workflows need repository
+settings that live outside the codebase. Do this once per generated project.
+
+### `CLAUDE_CODE_OAUTH_TOKEN` secret (required by `claude-review.yml`)
+
+Without it, every pull request gets a red "Claude review" check. The workflow
+verifies the secret before doing anything and fails loudly rather than exiting
+green, because a review that authenticated with nothing and posted nothing is
+indistinguishable from a clean review.
+
+```bash
+claude setup-token                                    # prints an OAuth token
+gh secret set CLAUDE_CODE_OAUTH_TOKEN --repo <owner>/<repo>
+```
+
+`claude setup-token` requires a Claude Pro or Max subscription. To bill an API
+key instead, set `ANTHROPIC_API_KEY` as the secret and swap
+`claude_code_oauth_token:` for `anthropic_api_key:` in the workflow.
+
+Two limits worth knowing before concluding the token is broken:
+- **Fork pull requests never receive secrets.** The review only runs for branches pushed to this repository.
+- **Draft pull requests are skipped** until marked ready for review.
+
+### Repository variables (required by `deploy.yml`)
+
+`AWS_ACCOUNT_ID`, `AWS_REGION` and `SERVICE_NAME`, set with `gh variable set`.
+They are variables rather than secrets because none is a credential. Deploying
+also needs the AWS-side setup described in the infrastructure instructions.
+
 ## Python / FastAPI
 
 ### Project Structure
