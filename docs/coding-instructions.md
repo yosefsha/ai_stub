@@ -4,21 +4,54 @@
 
 - All configuration must be production-ready standard — no placeholder values, TODO stubs, or "good enough for now" defaults. Every config entry should be deployable to production as-is.
 
+## Repository Layout
+
+The two services live in `backend/` and `frontend/` at the repository root.
+`.github/workflows/ci.yml` hardcodes those directory names as its working
+directories and runs on every push, so **CI fails until both exist with the
+files below.** A freshly generated project is red on its first push; creating
+these is the first task, not a later cleanup.
+
+```
+backend/
+  requirements.txt        # Runtime dependencies
+  requirements-dev.txt    # Includes requirements.txt, adds pytest + httpx
+  Dockerfile              # python:3.12-slim base
+  alembic.ini             # `alembic upgrade head` runs in CI before the suite
+  app/ tests/ config/     # See "Python / FastAPI" below
+frontend/
+  package.json            # Must define: dev, build, type-check, lint, test
+  package-lock.json       # CI runs `npm ci`, which fails without it
+  Dockerfile              # node:22-alpine base
+  src/                    # See the frontend section below
+docker-compose.yml        # Local Postgres + Redis, same images as CI
+```
+
+What CI needs from each, beyond the files existing:
+- `pip install -r backend/requirements-dev.txt` must pull in `pytest`, `httpx`, `psycopg` and `redis` — the last two are what the readiness check imports.
+- `alembic upgrade head` must apply cleanly to an empty database.
+- **`pytest` must not skip.** A skipped test fails the build; fixtures that skip themselves when no database is present will trip it, so gate them on something CI satisfies.
+- `npm run lint` must carry `--max-warnings 0`, or the lint gate can never fail.
+
+Building only one of the two services is a change to `ci.yml` — delete the job
+you don't need rather than leaving it red.
+
 ## Python / FastAPI
 
 ### Project Structure
 ```
-app/
-  __init__.py
-  main.py            # FastAPI app, route definitions
-  models.py           # Pydantic request/response schemas
-  <domain>.py         # Business logic classes
-  <domain>_loader.py  # Data loading / parsing utilities
-tests/
-  __init__.py
-  test_<module>.py    # Mirror app/ structure
-config/
-  *.json              # Runtime configuration files
+backend/
+  app/
+    __init__.py
+    main.py            # FastAPI app, route definitions
+    models.py           # Pydantic request/response schemas
+    <domain>.py         # Business logic classes
+    <domain>_loader.py  # Data loading / parsing utilities
+  tests/
+    __init__.py
+    test_<module>.py    # Mirror app/ structure
+  config/
+    *.json              # Runtime configuration files
 ```
 
 ### Code Style
@@ -51,13 +84,14 @@ config/
 
 ### Project Structure
 ```
-src/
-  main.tsx            # Entry point
-  App.tsx             # Root component
-  types.ts            # Shared type definitions
-  parser.ts           # Pure utility functions
-  components/
-    <Name>.tsx        # One component per file, PascalCase filename
+frontend/
+  src/
+    main.tsx            # Entry point
+    App.tsx             # Root component
+    types.ts            # Shared type definitions
+    parser.ts           # Pure utility functions
+    components/
+      <Name>.tsx        # One component per file, PascalCase filename
 ```
 
 ### Code Style
