@@ -15,9 +15,10 @@ The project folder is always created at DEFAULT_PROJECTS_DIR/<name>
 (/Users/yosefshachnovsky/dev/<name>) — the folder name always matches the
 repo name.
 
-Infrastructure (the `infra/` folder, `docs/infra-instructions.md`, and the
-CLAUDE.md section importing it) is excluded by default; pass --infra to
-include it.
+Infrastructure is excluded by default; pass --infra to include it. That covers
+the `infra/` folder, `docs/infra-instructions.md`, the CLAUDE.md section
+importing it, and `.github/workflows/deploy.yml`. `ci.yml` and
+`claude-review.yml` always copy.
 
 Usage:
     python scripts/create_remote_project.py my-new-project
@@ -64,7 +65,7 @@ def main() -> None:
     parser.add_argument(
         "--infra",
         action="store_true",
-        help="Include infra/, docs/infra-instructions.md and its CLAUDE.md section (excluded by default)",
+        help="Include infra/, the infra doc and its CLAUDE.md section, and deploy.yml (excluded by default)",
     )
     args = parser.parse_args()
 

@@ -5,9 +5,11 @@ The destination may already exist (e.g. an existing project root) or not
 (it will be created). Files/folders are merged into the destination,
 overwriting any same-named files that already exist there.
 
-Infrastructure (the `infra/` folder, `docs/infra-instructions.md`, and the
-CLAUDE.md section importing it) is excluded by default; pass --infra to
-include it.
+Infrastructure is excluded by default; pass --infra to include it. That covers
+the `infra/` folder, `docs/infra-instructions.md`, the CLAUDE.md section
+importing it, and `.github/workflows/deploy.yml`, which deploys to the stacks
+in `infra/` and does nothing without them. `ci.yml` and `claude-review.yml`
+are not infrastructure and always copy.
 
 Usage:
     python scripts/copy_repo.py /path/to/destination
@@ -32,7 +34,7 @@ DEFAULT_EXCLUDES = {
 
 # Paths (relative to the repo root) dropped unless --infra is passed.
 INFRA_DOC = "docs/infra-instructions.md"
-INFRA_EXCLUDES = {"infra", INFRA_DOC}
+INFRA_EXCLUDES = {"infra", INFRA_DOC, ".github/workflows/deploy.yml"}
 
 
 def strip_section_importing(text: str, doc_path: str) -> str:
@@ -94,7 +96,7 @@ def main() -> None:
     parser.add_argument(
         "--infra",
         action="store_true",
-        help=f"Include infra/, {INFRA_DOC} and its CLAUDE.md section (excluded by default)",
+        help="Include infra/, the infra doc and its CLAUDE.md section, and deploy.yml (excluded by default)",
     )
     args = parser.parse_args()
 

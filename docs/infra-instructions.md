@@ -44,7 +44,12 @@ Connection. Three workflows in `.github/workflows/`, each with one job to do.
 ### Authentication — OIDC, never stored keys
 - No AWS credential is stored in the repository. Jobs declare `permissions: id-token: write`, and `aws-actions/configure-aws-credentials@v4` exchanges the GitHub OIDC token for short-lived STS credentials that expire with the job.
 - The OIDC provider, the deploy role, and its trust policy live in `infra/stacks/deploy_stack.py`. The role name is **fixed and derivable** (`<service>-<env>-github-actions-deploy`) so the workflow can construct the ARN before it has credentials to look anything up with.
-- Account id, region, and service name are repository **variables** (`vars.AWS_ACCOUNT_ID`, `vars.AWS_REGION`, `vars.SERVICE_NAME`), not secrets — none is a credential, and putting them in secrets only makes logs unreadable.
+- Account id, region, and service name are repository **variables** (`vars.AWS_ACCOUNT_ID`, `vars.AWS_REGION`, `vars.SERVICE_NAME`), not secrets — none is a credential, and putting them in secrets only makes logs unreadable. Set them once per project; the gate job fails with an explicit message when `AWS_ACCOUNT_ID` is missing:
+  ```bash
+  gh variable set AWS_ACCOUNT_ID --body 123456789012
+  gh variable set AWS_REGION     --body us-east-1
+  gh variable set SERVICE_NAME   --body myapp
+  ```
 - Set `role-session-name` per job (e.g. `gha-backend-${{ github.run_id }}`) so a CloudTrail entry traces back to the run that made the call.
 
 ### `ci.yml` — the merge gate

@@ -38,8 +38,8 @@ you don't need rather than leaving it red.
 
 ## Repository Setup (GitHub)
 
-Files alone are not enough — two of the three workflows need repository
-settings that live outside the codebase. Do this once per generated project.
+Files alone are not enough — the workflows need repository settings that live
+outside the codebase. Do this once per generated project.
 
 ### `CLAUDE_CODE_OAUTH_TOKEN` secret (required by `claude-review.yml`)
 
@@ -60,12 +60,6 @@ key instead, set `ANTHROPIC_API_KEY` as the secret and swap
 Two limits worth knowing before concluding the token is broken:
 - **Fork pull requests never receive secrets.** The review only runs for branches pushed to this repository.
 - **Draft pull requests are skipped** until marked ready for review.
-
-### Repository variables (required by `deploy.yml`)
-
-`AWS_ACCOUNT_ID`, `AWS_REGION` and `SERVICE_NAME`, set with `gh variable set`.
-They are variables rather than secrets because none is a credential. Deploying
-also needs the AWS-side setup described in the infrastructure instructions.
 
 ## Python / FastAPI
 
