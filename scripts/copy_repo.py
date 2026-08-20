@@ -5,23 +5,29 @@ The destination may already exist (e.g. an existing project root) or not
 (it will be created). Files/folders are merged into the destination,
 overwriting any same-named files that already exist there.
 
-A generated project gets exactly one backend stack. `--backend python`
-(the default) keeps the FastAPI instructions, agent and CI job;
-`--backend nestjs` keeps the NestJS ones and drops the Python ones. The
-unused stack's CLAUDE.md section goes with its doc, so the generated
-CLAUDE.md never imports a file that isn't there.
+A generated project gets exactly one backend stack, and `--backend` is
+required: which one a project is built on is not a detail to be inherited
+from a default. `--backend python` keeps the FastAPI instructions, agent
+and CI job; `--backend nestjs` keeps the NestJS ones and drops the Python
+ones. The unused stack's CLAUDE.md section goes with its doc, so the
+generated CLAUDE.md never imports a file that isn't there.
 
-Infrastructure is excluded by default; pass --infra to include it. That covers
-the `infra/` folder, `docs/infra-instructions.md`, the CLAUDE.md section
-importing it, and `.github/workflows/deploy.yml`, which deploys to the stacks
-in `infra/` and does nothing without them. `ci.yml` and `claude-review.yml`
-are not infrastructure and always copy.
+Every flag is mandatory, and the booleans take an explicit `--x` / `--no-x`.
+What a generated project contains is not something to get by omission: the
+caller states the backend, and whether infrastructure comes along.
+
+This repo's `.git` is never copied. A destination that inherited it would
+inherit this repo's history and its `origin`, and its own first commit would
+be a deletion of whatever these flags excluded — see EXCLUDES below.
+
+`--infra` covers the `infra/` folder, `docs/infra-instructions.md`, the
+CLAUDE.md section importing it, and `.github/workflows/deploy.yml`, which
+deploys to the stacks in `infra/` and does nothing without them. `ci.yml` and
+`claude-review.yml` are not infrastructure and always copy.
 
 Usage:
-    python scripts/copy_repo.py /path/to/destination
-    python scripts/copy_repo.py /path/to/destination --include-git
-    python scripts/copy_repo.py /path/to/destination --infra
-    python scripts/copy_repo.py /path/to/destination --backend nestjs
+    python scripts/copy_repo.py /path/to/dest --backend python --no-infra
+    python scripts/copy_repo.py /path/to/dest --backend nestjs --infra
 """
 
 import argparse
@@ -31,7 +37,12 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-DEFAULT_EXCLUDES = {
+# Never copied, with no flag to opt back in. `.git` is the one that matters:
+# carrying it over would give the new project this repo's 11-commit history and
+# an `origin` pointing back here, `gh repo create --remote origin` would refuse
+# to add a remote that already exists, and the "initial commit" would land as a
+# deletion of every file these flags excluded.
+EXCLUDES = {
     ".git",
     "__pycache__",
     ".DS_Store",
@@ -44,7 +55,10 @@ DEFAULT_EXCLUDES = {
 # subtree is merged over the destination afterwards.
 TEMPLATES_DIR = "templates"
 
-DEFAULT_BACKEND = "python"
+# The backend whose migration command is written into the infra files as they
+# sit in this repo. Not a default for --backend — there is none — only the
+# starting point `swap_migration_command` rewrites away from.
+IN_TREE_BACKEND = "python"
 
 # Per-backend: the instructions doc (and, with it, the CLAUDE.md section that
 # imports it), the agent definition, and the overlay applied after the copy.
@@ -106,7 +120,7 @@ def apply_overlay(source: Path, destination: Path) -> None:
 
 def swap_migration_command(destination: Path, backend: str) -> None:
     """Point the infra's one-off migration task at `backend`'s command."""
-    current = MIGRATION_COMMANDS[DEFAULT_BACKEND]
+    current = MIGRATION_COMMANDS[IN_TREE_BACKEND]
     wanted = MIGRATION_COMMANDS[backend]
     if wanted == current:
         return
@@ -127,16 +141,11 @@ def swap_migration_command(destination: Path, backend: str) -> None:
 
 def copy_repo(
     destination: Path,
-    include_git: bool = False,
-    include_infra: bool = False,
-    backend: str = DEFAULT_BACKEND,
+    backend: str,
+    include_infra: bool,
 ) -> None:
     if backend not in BACKENDS:
         sys.exit(f"Unknown backend '{backend}'. Choose one of: {', '.join(BACKENDS)}.")
-
-    excludes = set(DEFAULT_EXCLUDES)
-    if include_git:
-        excludes.discard(".git")
 
     # Everything belonging to a backend that wasn't chosen, plus the overlay
     # sources themselves — a generated project carries no template folder.
@@ -156,7 +165,7 @@ def copy_repo(
         skipped = set()
         for name in names:
             rel_name = (rel / name).as_posix().removeprefix("./")
-            if name in excludes or rel_name in path_excludes:
+            if name in EXCLUDES or rel_name in path_excludes:
                 skipped.add(name)
         return skipped
 
@@ -186,24 +195,54 @@ def copy_repo(
             claude_md.write_text(stripped)
 
 
+EXAMPLES = """examples:
+  # FastAPI stack into a new folder, no AWS infrastructure
+  python scripts/copy_repo.py ~/dev/acme-api --backend python --no-infra
+
+  # NestJS stack merged over an existing project, with the CDK stacks
+  python scripts/copy_repo.py ~/dev/acme-api --backend nestjs --infra
+
+every argument above is required — there are no defaults to fall back on.
+"""
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("destination", type=Path, help="Target folder (created if it doesn't exist)")
-    parser.add_argument(
-        "--include-git",
-        action="store_true",
-        help="Also copy the .git directory (excluded by default)",
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        epilog=EXAMPLES,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        "--infra",
-        action="store_true",
-        help="Include infra/, the infra doc and its CLAUDE.md section, and deploy.yml (excluded by default)",
+        "destination",
+        metavar="DESTINATION",
+        type=Path,
+        help=(
+            "Target folder, e.g. ~/dev/acme-api. Created if it doesn't exist; "
+            "merged into if it does, overwriting same-named files"
+        ),
     )
     parser.add_argument(
         "--backend",
+        metavar="{python|nestjs}",
         choices=sorted(BACKENDS),
-        default=DEFAULT_BACKEND,
-        help="Backend stack to keep: python (FastAPI, default) or nestjs (TypeScript/NestJS)",
+        required=True,
+        help=(
+            "Backend stack to keep. "
+            "python = FastAPI in backend/app/, ruff + pytest, alembic migrations. "
+            "nestjs = NestJS in backend/src/, ESLint + tsc + jest, TypeORM migrations. "
+            "The other stack's doc, agent and CI job are left behind"
+        ),
+    )
+    parser.add_argument(
+        "--infra",
+        action=argparse.BooleanOptionalAction,
+        required=True,
+        help=(
+            "--infra copies infra/ (the CDK stacks), docs/infra-instructions.md, its "
+            "CLAUDE.md section and .github/workflows/deploy.yml, and swaps the migration "
+            "command to match --backend; --no-infra leaves all four out. ci.yml and "
+            "claude-review.yml copy either way"
+        ),
     )
     args = parser.parse_args()
 
@@ -214,9 +253,8 @@ def main() -> None:
 
     copy_repo(
         destination,
-        include_git=args.include_git,
-        include_infra=args.infra,
         backend=args.backend,
+        include_infra=args.infra,
     )
     print(f"Copied {REPO_ROOT} -> {destination} ({args.backend} backend)")
 

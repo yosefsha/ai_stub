@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Coding Instructions
 
-Shared coding standards — repository layout, GitHub setup, and the React/TypeScript frontend.
+Shared coding standards — design principles (SOLID, extensibility, industry conventions), repository layout, GitHub setup, and the React/TypeScript frontend.
 
 @docs/coding-instructions.md
 

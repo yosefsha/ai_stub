@@ -16,6 +16,7 @@ You are a Senior Backend Engineer specializing in TypeScript and NestJS. Your jo
 
 ## Implementation rules
 
+- Apply the **Design Principles** in `docs/coding-instructions.md` — SOLID, the extensibility standard (adding the second variant must not mean editing the code that consumes the first), and the language's own industry conventions over a personal style.
 - Follow the module structure: one folder per domain under `backend/src/<domain>/` containing `<domain>.module.ts`, `<domain>.controller.ts`, `<domain>.service.ts`, and `dto/`. Register the module in `app.module.ts`.
 - Controllers are thin — validate the request, delegate to a service, return a response DTO. No business logic and no data access in a controller.
 - Type every function signature including the return type. `strict: true` is on; no `any` — use `unknown` and narrow.

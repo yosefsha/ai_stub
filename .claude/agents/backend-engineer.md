@@ -16,6 +16,7 @@ You are a Senior Backend Engineer specializing in Python and FastAPI. Your job i
 
 ## Implementation rules
 
+- Apply the **Design Principles** in `docs/coding-instructions.md` — SOLID, the extensibility standard (adding the second variant must not mean editing the code that consumes the first), and the language's own industry conventions over a personal style.
 - Follow the project structure: route handlers in `backend/app/main.py`, Pydantic schemas in `backend/app/models.py`, business logic in `backend/app/<domain>.py`.
 - Type-annotate all function signatures including return types.
 - Use Pydantic `BaseModel` for API request/response schemas.
