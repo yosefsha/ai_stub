@@ -243,9 +243,9 @@ jobs:
       # ----------------------------------------------------------------------
       # Migration. This is the step that answers the one thing CodeBuild could do
       # that a GitHub-hosted runner cannot: run inside the VPC. RDS is in private
-      # subnets and admits only the ECS task security group, so `alembic upgrade
-      # head` runs as a one-off Fargate task in that group — from the image just
-      # built — rather than from the runner.
+      # subnets and admits only the ECS task security group, so the backend's
+      # migration command runs as a one-off Fargate task in that group — from the
+      # image just built — rather than from the runner.
       # ----------------------------------------------------------------------
       - name: Fetch the migration task definition
         env:
@@ -262,7 +262,7 @@ jobs:
           container-name: ${{ steps.ctx.outputs.migration_container }}
           image: ${{ steps.ctx.outputs.image }}
 
-      - name: Run alembic upgrade head as a one-off ECS task
+      - name: Run the database migration as a one-off ECS task
         uses: aws-actions/amazon-ecs-deploy-task-definition@v2
         with:
           task-definition: ${{ steps.migration-taskdef.outputs.task-definition }}
@@ -289,7 +289,7 @@ jobs:
           # ENABLED, and read from the stack rather than written here. The VPC
           # has no NAT Gateway (removed for cost — see network_stack.py), so
           # these are public subnets and a task in one without a public IP has
-          # no route to ECR: it never pulls its image, never runs `alembic`, and
+          # no route to ECR: it never pulls its image, never runs the migration, and
           # stops with a CannotPullContainerError that the step below reports as
           # a missing exit code. Restoring a NAT Gateway flips this in one place.
           run-task-assign-public-IP: ${{ steps.ctx.outputs.assign_public_ip }}

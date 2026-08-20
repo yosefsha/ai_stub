@@ -1,0 +1,246 @@
+name: CI
+
+# The gate that has to go red before a human is asked to read the diff:
+# lint, type-check, test and image build for both services.
+#
+# This is the NestJS variant of ci.yml, installed by
+# `scripts/create_remote_project.py --backend nestjs`. The frontend and images
+# jobs are identical to the Python variant; only the backend job differs.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  # `gh workflow run ci.yml` needs the workflow to accept a manual trigger.
+  workflow_dispatch:
+
+# One in-flight run per branch. A new push supersedes the run it invalidated.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# Explicit `bash`, which GitHub runs as `bash -e -o pipefail`: a step fails on
+# the first non-zero exit, and a failing command in a pipeline is not masked by
+# a succeeding one after it.
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  backend:
+    name: Backend — lint + type-check + test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        # The service lives in backend/; a run from the repo root finds nothing.
+        working-directory: backend
+
+    # Real Postgres and Redis, not mocks of them. Same images and the same
+    # health probes as docker-compose.yml, so a test that passes here passes
+    # against the local stack too.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: app
+          POSTGRES_DB: app
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U app -d app"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+          --health-start-period 10s
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      # Point the app at the service containers. Both are published on the
+      # runner's loopback interface because the job's steps run on the host,
+      # not inside a job container.
+      DATABASE_URL: postgresql://app:app@localhost:5432/app
+      REDIS_URL: redis://localhost:6379/0
+      # ALLOWED_ORIGINS is deliberately left unset so the tests assert against
+      # the application's built-in default origin.
+      NODE_ENV: test
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          # Matches the `node:22-alpine` base in backend/Dockerfile.
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        # `npm ci`, not `npm install`: the lockfile is the input, and a lockfile
+        # that has drifted from package.json is itself a failure. Dev
+        # dependencies are needed here — the runtime image installs with
+        # `--omit=dev`, this job does not.
+        run: npm ci
+
+      - name: Lint
+        # `npm run lint` must carry `--max-warnings 0`. Without it the gate can
+        # never fail: typescript-eslint's recommended preset ships most rules as
+        # warnings, so a file full of violations still exits 0.
+        run: npm run lint
+
+      - name: Type-check
+        # Its own gate, so a type error is reported as a type error rather than
+        # as a build failure. `npm run build` type-checks again; the second run
+        # is incremental and near-free.
+        run: npm run type-check
+
+      - name: Wait for Postgres and Redis to accept connections
+        # The container health checks gate the job start, but a green health
+        # check on a published port is not proof the test process can reach it.
+        # Connecting here turns "service missing" into a clear failure rather
+        # than a confusing test error, and proves the tests below run against
+        # live servers. `pg` and `ioredis` are the app's own drivers, already
+        # installed by the step above.
+        run: |
+          node --input-type=module - <<'JS'
+          import { Client } from 'pg';
+          import Redis from 'ioredis';
+
+          const deadline = Date.now() + 60_000;
+          const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+          for (;;) {
+            const client = new Client({ connectionString: process.env.DATABASE_URL, connectionTimeoutMillis: 5000 });
+            try {
+              await client.connect();
+              const { rows } = await client.query('SELECT version()');
+              console.log(`postgres ready: ${rows[0].version}`);
+              await client.end();
+              break;
+            } catch (err) {
+              await client.end().catch(() => {});
+              if (Date.now() > deadline) throw new Error(`postgres never became reachable: ${err}`);
+              await sleep(2000);
+            }
+          }
+
+          for (;;) {
+            const redis = new Redis(process.env.REDIS_URL, { connectTimeout: 5000, lazyConnect: true, maxRetriesPerRequest: 1 });
+            try {
+              await redis.connect();
+              await redis.ping();
+              const info = await redis.info('server');
+              console.log(`redis ready: ${/redis_version:(\S+)/.exec(info)?.[1]}`);
+              redis.disconnect();
+              break;
+            } catch (err) {
+              redis.disconnect();
+              if (Date.now() > deadline) throw new Error(`redis never became reachable: ${err}`);
+              await sleep(2000);
+            }
+          }
+          JS
+
+      - name: Migrate the database (npm run migration:run)
+        # Without this, Postgres is reachable but schema-less, and every
+        # database-backed test skips itself rather than failing — so the suite
+        # goes green having never touched a table. Running the migration here
+        # makes those tests actually execute, and doubles as a check that the
+        # migration itself applies cleanly to an empty database on every PR.
+        run: npm run migration:run
+
+      - name: Test (jest)
+        # A skip is a CI failure here, not a pass. The database-backed specs
+        # skip themselves when the schema is absent — deliberate, so the suite
+        # stays usable on a laptop with no Postgres — but in CI that same skip
+        # would let a broken repository through green. With the migration step
+        # above, nothing should legitimately skip; if something ever must, this
+        # gate is the right place to have that argued out explicitly.
+        #
+        # Jest writes its summary to stderr, hence the 2>&1. `--ci` also fails
+        # on a snapshot that would be written rather than matched.
+        run: |
+          npm test -- --ci 2>&1 | tee jest-output.txt
+          npm run test:e2e -- --ci 2>&1 | tee -a jest-output.txt
+          if grep -qE '[0-9]+ (skipped|todo)' jest-output.txt; then
+            echo "::error::Tests were skipped in CI — see the summary above."
+            exit 1
+          fi
+
+  frontend:
+    name: Frontend — lint + type-check + test + build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        # The SPA lives in frontend/.
+        working-directory: frontend
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          # Matches the `node:22-alpine` base in frontend/Dockerfile.
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        # `npm ci`, not `npm install`: the lockfile is the input, and a lockfile
+        # that has drifted from package.json is itself a failure.
+        run: npm ci
+
+      - name: Lint
+        # `npm run lint` must carry `--max-warnings 0`. Without it the gate can
+        # never fail: recommended presets ship most rules as warnings, so a file
+        # full of violations still exits 0.
+        run: npm run lint
+
+      - name: Type-check
+        # Its own gate, so a type error is reported as a type error rather than
+        # as a build failure. `npm run build` type-checks again; the second run
+        # is incremental and near-free.
+        #
+        # The script is the seam: package.json points `type-check` at whatever
+        # the project's framework needs (`tsc -b`, `vue-tsc -b`, …), and this
+        # workflow does not have to know which.
+        run: npm run type-check
+
+      - name: Test
+        run: npm run test
+
+      - name: Build
+        run: npm run build
+
+  images:
+    name: Images — docker build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Build the backend image
+        # Build context is backend/, matching docker-compose.yml. The image is
+        # built, not pushed: this stage only proves the Dockerfile still builds.
+        run: docker build --pull -t ${{ github.event.repository.name }}-backend:${{ github.sha }} backend
+
+      - name: Build the frontend image
+        # The frontend Dockerfile runs `npm run build` inside the builder stage,
+        # so a type error fails this job as well as the frontend job.
+        run: docker build --pull -t ${{ github.event.repository.name }}-frontend:${{ github.sha }} frontend

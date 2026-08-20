@@ -11,7 +11,7 @@ infra/
   stacks/
     __init__.py
     network_stack.py   # VPC, subnets, security groups
-    backend_stack.py   # ECS/Fargate service for FastAPI
+    backend_stack.py   # ECS/Fargate service for the backend API
     frontend_stack.py  # S3 + CloudFront for the SPA
     deploy_stack.py    # GitHub OIDC provider + deploy role, CfnOutputs
   config/
@@ -19,9 +19,10 @@ infra/
     staging.py         # Staging environment config
 ```
 
-## Backend (FastAPI on ECS Fargate)
+## Backend (API on ECS Fargate)
 - Deploy as a Docker container on **ECS Fargate** behind an **ALB**.
-- Dockerfile: multi-stage build — `python:3.12-slim` base, install from locked `requirements.lock`, run with `uvicorn --workers 4 --host 0.0.0.0 --port 8000`.
+- Dockerfile: multi-stage build, listening on port **8000** — the base image, install step and entrypoint are stack-specific and live in the backend instructions doc CLAUDE.md imports (`docs/backend-python-instructions.md` or `docs/backend-nestjs-instructions.md`).
+- Migrations run as the backend's own migration command (`alembic upgrade head` for Python, `npm run migration:run` for NestJS). It appears in exactly two places — `infra/stacks/backend_stack.py` and the `run-task-container-overrides` line in `deploy.yml` — and `scripts/copy_repo.py` swaps both when a project is generated with `--backend nestjs`.
 - ALB health check targets `GET /health`.
 - Auto-scaling: target 70% CPU utilization, min 2 / max 10 tasks.
 - Logs to **CloudWatch Logs** with 30-day retention.
@@ -55,11 +56,12 @@ Connection. Three workflows in `.github/workflows/`, each with one job to do.
 ### `ci.yml` — the merge gate
 - Triggers on `pull_request` and `push` to `main`, plus `workflow_dispatch`. Concurrency group per ref with `cancel-in-progress: true` — a new push supersedes the run it invalidated.
 - `permissions: contents: read` only. `defaults.run.shell: bash` everywhere, so steps run under `bash -e -o pipefail`.
-- Three independent jobs: **backend** (ruff + pytest), **frontend** (lint + type-check + test + build), **images** (docker build for both).
+- Three independent jobs: **backend** (lint + tests for whichever backend stack the project uses), **frontend** (lint + type-check + test + build), **images** (docker build for both).
 - Backend tests run against **real service containers** (Postgres, Redis) using the same images and health probes as `docker-compose.yml` — not mocks. Wait for each to accept a connection before testing, so an unreachable service is a clear failure rather than a confusing test error.
-- Run database migrations (`alembic upgrade head`) **before** the suite. Without it the schema-less database makes database-backed tests skip themselves and the suite goes green having touched no table.
-- **A skipped test is a CI failure.** Fixtures may skip locally where there is no database; in CI that same skip would let a broken repo through. Grep the pytest output for skips and fail the job.
-- Pin the linter version in the workflow (`pip install ruff==0.16.2`), not in `requirements-dev.txt` — the gate must not drift under the codebase when a new release adds or relaxes a rule.
+- Run database migrations **before** the suite. Without it the schema-less database makes database-backed tests skip themselves and the suite goes green having touched no table.
+- **A skipped test is a CI failure.** Fixtures may skip locally where there is no database; in CI that same skip would let a broken repo through. Grep the test runner's output for skips and fail the job.
+- Pin the linter version in the workflow (`pip install ruff==0.16.2` for Python), not in the project's dependency file — the gate must not drift under the codebase when a new release adds or relaxes a rule. A NestJS backend pins ESLint through its committed `package-lock.json`, which `npm ci` enforces.
+- The backend job is the one job that differs per stack. `.github/workflows/ci.yml` ships the Python variant; `templates/backend-nestjs/.github/workflows/ci.yml` is the NestJS one, installed over it by `--backend nestjs`.
 - Frontend lint must carry `--max-warnings 0`; otherwise every recommended-preset warning exits 0 and the gate can never fail. Run the type-check as its own step so a type error is reported as a type error, not as a build failure.
 - The images job **builds but does not push** — it only proves the Dockerfiles still build.
 

@@ -13,12 +13,8 @@ files below.** A freshly generated project is red on its first push; creating
 these is the first task, not a later cleanup.
 
 ```
-backend/
-  requirements.txt        # Runtime dependencies
-  requirements-dev.txt    # Includes requirements.txt, adds pytest + httpx
-  Dockerfile              # python:3.12-slim base
-  alembic.ini             # `alembic upgrade head` runs in CI before the suite
-  app/ tests/ config/     # See "Python / FastAPI" below
+backend/                  # Language-specific — see the backend instructions
+                          # doc CLAUDE.md imports for its layout and CI needs
 frontend/
   package.json            # Must define: dev, build, type-check, lint, test
   package-lock.json       # CI runs `npm ci`, which fails without it
@@ -27,11 +23,16 @@ frontend/
 docker-compose.yml        # Local Postgres + Redis, same images as CI
 ```
 
-What CI needs from each, beyond the files existing:
-- `pip install -r backend/requirements-dev.txt` must pull in `pytest`, `httpx`, `psycopg` and `redis` — the last two are what the readiness check imports.
-- `alembic upgrade head` must apply cleanly to an empty database.
-- **`pytest` must not skip.** A skipped test fails the build; fixtures that skip themselves when no database is present will trip it, so gate them on something CI satisfies.
-- `npm run lint` must carry `--max-warnings 0`, or the lint gate can never fail.
+Exactly one backend instructions doc is present in a generated project —
+`docs/backend-python-instructions.md` or `docs/backend-nestjs-instructions.md`,
+chosen by `scripts/create_remote_project.py --backend`. It owns the `backend/`
+layout, the CI contract for that stack, and the container runtime. `ci.yml`
+matches whichever one is there.
+
+What CI needs from the frontend, beyond the files existing:
+- **`npm run lint` must carry `--max-warnings 0`**, or the lint gate can never fail.
+- `npm run type-check` runs as its own gate, so a type error is reported as one.
+- `npm run test` must not skip — a skipped test is treated as a failure.
 
 Building only one of the two services is a change to `ci.yml` — delete the job
 you don't need rather than leaving it red.
@@ -60,50 +61,6 @@ key instead, set `ANTHROPIC_API_KEY` as the secret and swap
 Two limits worth knowing before concluding the token is broken:
 - **Fork pull requests never receive secrets.** The review only runs for branches pushed to this repository.
 - **Draft pull requests are skipped** until marked ready for review.
-
-## Python / FastAPI
-
-### Project Structure
-```
-backend/
-  app/
-    __init__.py
-    main.py            # FastAPI app, route definitions
-    models.py           # Pydantic request/response schemas
-    <domain>.py         # Business logic classes
-    <domain>_loader.py  # Data loading / parsing utilities
-  tests/
-    __init__.py
-    test_<module>.py    # Mirror app/ structure
-  config/
-    *.json              # Runtime configuration files
-```
-
-### Code Style
-- Type-annotate all function signatures including return types.
-- Use `dataclass(frozen=True)` for internal value objects that don't need Pydantic validation.
-- Use Pydantic `BaseModel` for API request/response schemas.
-- Route handlers must be thin — delegate to business logic classes.
-- Use `snake_case` for functions and variables, `PascalCase` for classes.
-- One class/concern per file.
-
-### Configuration
-- Use environment variables for all runtime configuration (DB URLs, file paths, feature flags).
-- Provide sensible defaults so local development works without any env vars set.
-- Load configuration at module level so it's available at startup.
-
-### Testing
-- Use `pytest` as the test runner.
-- Use FastAPI's `TestClient` for API/integration tests.
-- Unit tests should construct dependencies inline (no shared global fixtures for business logic).
-- Test both success paths and error/edge cases.
-- Run a single test: `pytest tests/test_file.py::test_name`
-
-### Dependencies
-- Pin minimum versions in `requirements.txt` (e.g., `fastapi>=0.115.0`).
-- For production, generate a locked `requirements.lock` with exact versions.
-
----
 
 ## React / TypeScript
 

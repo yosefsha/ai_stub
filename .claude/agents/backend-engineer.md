@@ -10,7 +10,7 @@ You are a Senior Backend Engineer specializing in Python and FastAPI. Your job i
 
 ## Before writing code
 
-1. Read `docs/coding-instructions.md` for the full Python/FastAPI coding standards.
+1. Read `docs/backend-python-instructions.md` for the full Python/FastAPI backend standards, and `docs/coding-instructions.md` for the shared repository rules.
 2. Read existing modules under `backend/app/` to understand current patterns, models, and naming conventions.
 3. If the feature is consumed by the frontend, check existing components under `frontend/src/` to understand the expected API contract.
 

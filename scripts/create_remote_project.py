@@ -15,6 +15,14 @@ The project folder is always created at DEFAULT_PROJECTS_DIR/<name>
 (/Users/yosefshachnovsky/dev/<name>) — the folder name always matches the
 repo name.
 
+The new project gets one backend stack, chosen with --backend:
+  python (default)  FastAPI on `backend/app/`, ruff + pytest in CI,
+                    `alembic upgrade head` as the migration command.
+  nestjs            NestJS on `backend/src/`, ESLint + tsc + jest in CI,
+                    `npm run migration:run` as the migration command.
+The other stack's instructions doc, agent and CI job are left behind, so the
+generated repo has exactly one set and CLAUDE.md imports only what is there.
+
 Infrastructure is excluded by default; pass --infra to include it. That covers
 the `infra/` folder, `docs/infra-instructions.md`, the CLAUDE.md section
 importing it, and `.github/workflows/deploy.yml`. `ci.yml` and
@@ -24,6 +32,7 @@ Usage:
     python scripts/create_remote_project.py my-new-project
     python scripts/create_remote_project.py my-new-project --public
     python scripts/create_remote_project.py my-new-project --infra
+    python scripts/create_remote_project.py my-new-project --backend nestjs
 """
 
 import argparse
@@ -32,7 +41,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from copy_repo import REPO_ROOT, copy_repo
+from copy_repo import BACKENDS, DEFAULT_BACKEND, REPO_ROOT, copy_repo
 
 DEFAULT_PROJECTS_DIR = Path("/Users/yosefshachnovsky/dev")
 
@@ -67,6 +76,12 @@ def main() -> None:
         action="store_true",
         help="Include infra/, the infra doc and its CLAUDE.md section, and deploy.yml (excluded by default)",
     )
+    parser.add_argument(
+        "--backend",
+        choices=sorted(BACKENDS),
+        default=DEFAULT_BACKEND,
+        help="Backend stack for the new project: python (FastAPI, default) or nestjs (TypeScript/NestJS)",
+    )
     args = parser.parse_args()
 
     check_gh_ready()
@@ -84,8 +99,13 @@ def main() -> None:
     if destination.exists() and any(destination.iterdir()):
         sys.exit(f"Destination '{destination}' already exists and is not empty.")
 
-    print(f"Creating project folder: {destination}")
-    copy_repo(destination, include_git=args.include_git, include_infra=args.infra)
+    print(f"Creating project folder: {destination} ({args.backend} backend)")
+    copy_repo(
+        destination,
+        include_git=args.include_git,
+        include_infra=args.infra,
+        backend=args.backend,
+    )
 
     print("Initializing git repo and creating initial commit...")
     run(["git", "init", "-b", "main"], cwd=destination)
