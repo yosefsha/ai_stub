@@ -36,8 +36,8 @@ CLAUDE.md section importing it, and `.github/workflows/deploy.yml`. `ci.yml`
 and `claude-review.yml` always copy.
 
 Usage:
-    python scripts/create_remote_project.py my-app --backend python --private --description "..." --no-infra
-    python scripts/create_remote_project.py my-app --backend nestjs --public --description "..." --infra
+    python scripts/create_remote_project.py my-app --backend python --private --desc "..." --no-infra
+    python scripts/create_remote_project.py my-app --backend nestjs --public --desc "..." --infra
 """
 
 import argparse
@@ -67,11 +67,11 @@ def check_gh_ready() -> None:
 EXAMPLES = """examples:
   # Private FastAPI project, no AWS infrastructure
   python scripts/create_remote_project.py acme-api \\
-      --backend python --private --description "Acme ordering API" --no-infra
+      --backend python --private --desc "Acme ordering API" --no-infra
 
   # Public NestJS project, with the CDK stacks and deploy.yml
   python scripts/create_remote_project.py acme-api \\
-      --backend nestjs --public --description "Acme ordering API" --infra
+      --backend nestjs --public --desc "Acme ordering API" --infra
 
 every argument above is required — there are no defaults to fall back on.
 """
@@ -93,10 +93,10 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--description",
+        "--desc",
         metavar="TEXT",
         required=True,
-        help='One-line repo description, e.g. --description "Acme ordering API". Shown on the GitHub repo page',
+        help='One-line repo description, e.g. --desc "Acme ordering API". Shown on the GitHub repo page',
     )
     parser.add_argument(
         "--backend",
@@ -160,7 +160,7 @@ def main() -> None:
     gh_cmd = [
         "gh", "repo", "create", args.name,
         visibility_flag,
-        "--description", args.description,
+        "--description", args.desc,
         "--source", str(destination),
         "--remote", "origin",
         "--push",
