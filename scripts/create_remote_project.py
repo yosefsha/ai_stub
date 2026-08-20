@@ -36,8 +36,8 @@ CLAUDE.md section importing it, and `.github/workflows/deploy.yml`. `ci.yml`
 and `claude-review.yml` always copy.
 
 Usage:
-    python scripts/create_remote_project.py my-app --backend python --private --desc "..." --no-infra
-    python scripts/create_remote_project.py my-app --backend nestjs --public --desc "..." --infra
+    python scripts/create_remote_project.py --name my-app --backend python --private --desc "..." --no-infra
+    python scripts/create_remote_project.py --name my-app --backend nestjs --public --desc "..." --infra
 """
 
 import argparse
@@ -66,11 +66,11 @@ def check_gh_ready() -> None:
 
 EXAMPLES = """examples:
   # Private FastAPI project, no AWS infrastructure
-  python scripts/create_remote_project.py acme-api \\
+  python scripts/create_remote_project.py --name acme-api \\
       --backend python --private --desc "Acme ordering API" --no-infra
 
   # Public NestJS project, with the CDK stacks and deploy.yml
-  python scripts/create_remote_project.py acme-api \\
+  python scripts/create_remote_project.py --name acme-api \\
       --backend nestjs --public --desc "Acme ordering API" --infra
 
 every argument above is required — there are no defaults to fall back on.
@@ -84,12 +84,13 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        "name",
+        "--name",
         metavar="NAME",
+        required=True,
         help=(
             "Name for the new repo and project folder (both always match). "
-            "Lowercase kebab-case, e.g. acme-api — it becomes the GitHub repo "
-            f"name and the folder {DEFAULT_PROJECTS_DIR}/NAME"
+            "Lowercase kebab-case, e.g. --name acme-api — it becomes the GitHub "
+            f"repo name and the folder {DEFAULT_PROJECTS_DIR}/NAME"
         ),
     )
     parser.add_argument(
