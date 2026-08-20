@@ -26,18 +26,24 @@ stack a project is built on is not a detail to be inherited from a default:
 The other stack's instructions doc, agent and CI job are left behind, so the
 generated repo has exactly one set and CLAUDE.md imports only what is there.
 
-Every flag is mandatory, and `--infra` takes an explicit `--infra` /
-`--no-infra`. This script creates a public-or-private repo under the user's
-GitHub account on its last step; nothing about what it ships should be arrived
-at by leaving an argument out.
+Every flag is mandatory, and each boolean takes an explicit pair of forms
+(`--infra` / `--no-infra`, `--with-otel` / `--without-otel`). This script
+creates a public-or-private repo under the user's GitHub account on its last
+step; nothing about what it ships should be arrived at by leaving an argument
+out.
 
 `--infra` covers the `infra/` folder, `docs/infra-instructions.md`, the
 CLAUDE.md section importing it, and `.github/workflows/deploy.yml`. `ci.yml`
 and `claude-review.yml` always copy.
 
+`--with-otel` keeps the "Tracing (OpenTelemetry)" section of whichever backend
+instructions doc ships — the console-exporter setup that prints spans to stdout
+with no collector running, and the OTLP swap for a deployed environment.
+`--without-otel` drops that section and nothing else.
+
 Usage:
-    python scripts/create_remote_project.py --name my-app --backend python --private --desc "..." --no-infra
-    python scripts/create_remote_project.py --name my-app --backend nestjs --public --desc "..." --infra
+    python scripts/create_remote_project.py --name my-app --backend python --private --desc "..." --no-infra --with-otel
+    python scripts/create_remote_project.py --name my-app --backend nestjs --public --desc "..." --infra --without-otel
 """
 
 import argparse
@@ -65,13 +71,13 @@ def check_gh_ready() -> None:
 
 
 EXAMPLES = """examples:
-  # Private FastAPI project, no AWS infrastructure
+  # Private FastAPI project, no AWS infrastructure, traced
   python scripts/create_remote_project.py --name acme-api \\
-      --backend python --private --desc "Acme ordering API" --no-infra
+      --backend python --private --desc "Acme ordering API" --no-infra --with-otel
 
-  # Public NestJS project, with the CDK stacks and deploy.yml
+  # Public NestJS project, with the CDK stacks and deploy.yml, untraced
   python scripts/create_remote_project.py --name acme-api \\
-      --backend nestjs --public --desc "Acme ordering API" --infra
+      --backend nestjs --public --desc "Acme ordering API" --infra --without-otel
 
 every argument above is required — there are no defaults to fall back on.
 """
@@ -127,6 +133,25 @@ def main() -> None:
             "claude-review.yml ship either way"
         ),
     )
+    # Not a --otel/--no-otel pair: "with"/"without" reads as what the generated
+    # project has, which is what this flag decides.
+    otel = parser.add_mutually_exclusive_group(required=True)
+    otel.add_argument(
+        "--with-otel",
+        dest="otel",
+        action="store_true",
+        help=(
+            "Ship the tracing section of the backend instructions doc: the "
+            "OpenTelemetry console exporter for local debugging, the OTLP swap "
+            "for a deployed environment, and the span conventions"
+        ),
+    )
+    otel.add_argument(
+        "--without-otel",
+        dest="otel",
+        action="store_false",
+        help="Leave that section out — no tracing guidance in the new project",
+    )
     args = parser.parse_args()
 
     check_gh_ready()
@@ -144,11 +169,13 @@ def main() -> None:
     if destination.exists() and any(destination.iterdir()):
         sys.exit(f"Destination '{destination}' already exists and is not empty.")
 
-    print(f"Creating project folder: {destination} ({args.backend} backend)")
+    tracing = "with tracing" if args.otel else "no tracing"
+    print(f"Creating project folder: {destination} ({args.backend} backend, {tracing})")
     copy_repo(
         destination,
         backend=args.backend,
         include_infra=args.infra,
+        include_otel=args.otel,
     )
 
     print("Initializing git repo and creating initial commit...")

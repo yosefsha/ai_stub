@@ -87,3 +87,102 @@ return types and its own error types. One implementation per source under
 - Run as a non-root user, and `dumb-init` (or `--init`) as PID 1 so SIGTERM reaches Node and `app.enableShutdownHooks()` can drain.
 - `GET /health` must return 200 — the ALB health check targets it.
 - Database migrations run as `npm run migration:run`, both in CI and as the one-off ECS task in `deploy.yml`. The runtime image must therefore ship the compiled migrations and the TypeORM CLI datasource.
+
+## Tracing (OpenTelemetry)
+Spans are instrumented in the application; where they are sent is a deployment
+detail. Local runs and production emit the *same* spans — only the exporter
+differs, and it is chosen from the environment at startup, never by an `if` in
+a controller.
+
+- `src/tracing.ts` is imported as the **first line of `main.ts`**, before
+  `NestFactory` or any module. Auto-instrumentation patches `http`, `pg` and
+  the rest as they are required; anything loaded before the SDK starts is
+  never instrumented.
+- With no collector configured, `ConsoleSpanExporter` prints each span to
+  stdout — parent/child nesting, durations and attributes, readable in the
+  terminal that is already open. This is the local debugging setup: no
+  container, no agent, no browser tab.
+- When `OTEL_EXPORTER_OTLP_ENDPOINT` is set, the OTLP exporter takes over.
+  That env var is the only difference between a laptop and ECS.
+
+```typescript
+// src/tracing.ts — imported first in main.ts, before any Nest module
+import { getNodeAutoInstrumentations } from '@opentelemetry/auto-instrumentations-node';
+import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
+import { NodeSDK } from '@opentelemetry/sdk-node';
+import { ConsoleSpanExporter } from '@opentelemetry/sdk-trace-node';
+
+const otlpEndpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+
+const sdk = new NodeSDK({
+  serviceName: process.env.OTEL_SERVICE_NAME ?? 'backend',
+  traceExporter: otlpEndpoint ? new OTLPTraceExporter() : new ConsoleSpanExporter(),
+  instrumentations: [
+    getNodeAutoInstrumentations({
+      '@opentelemetry/instrumentation-http': {
+        ignoreIncomingRequestHook: (req) => req.url === '/health',
+      },
+      '@opentelemetry/instrumentation-fs': { enabled: false },
+    }),
+  ],
+});
+
+sdk.start();
+process.once('SIGTERM', () => void sdk.shutdown());
+```
+
+```typescript
+// src/main.ts
+import './tracing';           // must stay first — see above
+import { NestFactory } from '@nestjs/core';
+```
+
+Two deliberate exceptions to the rules elsewhere in this document:
+
+- **`process.env` is read directly here.** Tracing starts before the Nest
+  container exists, so `ConfigService` is not available yet. This file is the
+  only place outside `config/configuration.ts` allowed to touch `process.env`.
+- Skipping `/health` is not optional: the ALB probes it every 30 seconds per
+  task, and those spans would outnumber the real traffic. `instrumentation-fs`
+  is off for the same reason — it spans every file read.
+
+Instrumenting your own code:
+
+```typescript
+import { trace } from '@opentelemetry/api';
+
+const tracer = trace.getTracer('orders');
+
+return tracer.startActiveSpan('parse_order', (span) => {
+  span.setAttribute('order.id', orderId);
+  try {
+    return this.parse(payload);
+  } finally {
+    span.end();
+  }
+});
+```
+
+- Span names are low-cardinality domain verbs (`parse_order`, `settle_invoice`).
+  Never interpolate an id into a name — ids are attributes.
+- Auto-instrument the boundaries you don't own (HTTP, `pg`, `ioredis`) and
+  write manual spans only for domain steps worth naming. A span per private
+  method produces a waterfall nobody reads.
+- **Record the failure path.** `span.recordException(err)` and
+  `span.setStatus({ code: SpanStatusCode.ERROR })` where the error is caught,
+  or the trace of a request that 500'd looks fast and successful.
+- `span.end()` belongs in a `finally`. A span that is never ended is never
+  exported, so the bug you were chasing leaves no trace at all.
+- Traces complement structured logs, they do not replace them. Log the
+  `traceId` so a log line leads to its trace.
+
+Dependencies: `@opentelemetry/sdk-node`, `@opentelemetry/api`,
+`@opentelemetry/auto-instrumentations-node`,
+`@opentelemetry/exporter-trace-otlp-http`. They are runtime dependencies — the
+production image installs with `npm ci --omit=dev`, and `dist/tracing.js` must
+be there.
+
+For a waterfall UI locally, add `jaegertracing/all-in-one` to
+`docker-compose.yml` (ports `16686` for the UI, `4318` for OTLP/HTTP) and set
+`OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318`. One container, and the
+application code does not change.

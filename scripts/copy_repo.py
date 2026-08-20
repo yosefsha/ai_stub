@@ -12,9 +12,10 @@ and CI job; `--backend nestjs` keeps the NestJS ones and drops the Python
 ones. The unused stack's CLAUDE.md section goes with its doc, so the
 generated CLAUDE.md never imports a file that isn't there.
 
-Every flag is mandatory, and the booleans take an explicit `--x` / `--no-x`.
+Every flag is mandatory, and each boolean takes an explicit pair of forms.
 What a generated project contains is not something to get by omission: the
-caller states the backend, and whether infrastructure comes along.
+caller states the backend, whether infrastructure comes along, and whether the
+backend is instrumented for tracing.
 
 This repo's `.git` is never copied. A destination that inherited it would
 inherit this repo's history and its `origin`, and its own first commit would
@@ -25,9 +26,14 @@ CLAUDE.md section importing it, and `.github/workflows/deploy.yml`, which
 deploys to the stacks in `infra/` and does nothing without them. `ci.yml` and
 `claude-review.yml` are not infrastructure and always copy.
 
+`--with-otel` keeps the "Tracing (OpenTelemetry)" section of whichever backend
+instructions doc ships — the console-exporter setup for local debugging and the
+OTLP swap for a deployed environment. `--without-otel` drops that one section;
+the rest of the doc is untouched, and nothing outside it references tracing.
+
 Usage:
-    python scripts/copy_repo.py /path/to/dest --backend python --no-infra
-    python scripts/copy_repo.py /path/to/dest --backend nestjs --infra
+    python scripts/copy_repo.py /path/to/dest --backend python --no-infra --with-otel
+    python scripts/copy_repo.py /path/to/dest --backend nestjs --infra --without-otel
 """
 
 import argparse
@@ -95,13 +101,19 @@ MIGRATION_COMMANDS = {
 INFRA_DOC = "docs/infra-instructions.md"
 INFRA_EXCLUDES = {"infra", INFRA_DOC, ".github/workflows/deploy.yml"}
 
+# The tracing section of a backend instructions doc, dropped by --without-otel.
+# Anchored on the exporter class rather than on the heading: the heading is
+# prose and may be reworded, the class name is the code the section exists to
+# document and appears nowhere else in either doc.
+OTEL_ANCHOR = "ConsoleSpanExporter"
 
-def strip_section_importing(text: str, doc_path: str) -> str:
-    """Drop the `## ` section of a markdown document that imports `doc_path`.
 
-    Anchored on the import path rather than the heading text, so renaming the
-    heading can't silently break the exclusion. The section runs from its `## `
-    heading to the next `## ` heading or EOF.
+def strip_section_containing(text: str, marker: str) -> str:
+    """Drop the `## ` section(s) of a markdown document containing `marker`.
+
+    Anchored on a literal from the section's own body rather than on the
+    heading text, so rewording a heading can't silently break the exclusion.
+    A section runs from its `## ` heading to the next `## ` heading or EOF.
     """
     sections: list[list[str]] = [[]]
     for line in text.splitlines(keepends=True):
@@ -109,7 +121,7 @@ def strip_section_importing(text: str, doc_path: str) -> str:
             sections.append([])
         sections[-1].append(line)
 
-    kept = ["".join(s) for s in sections if doc_path not in "".join(s)]
+    kept = ["".join(s) for s in sections if marker not in "".join(s)]
     return "".join(kept).rstrip("\n") + "\n"
 
 
@@ -139,10 +151,24 @@ def swap_migration_command(destination: Path, backend: str) -> None:
         path.write_text(text.replace(current, wanted))
 
 
+def strip_otel_section(destination: Path, backend: str) -> None:
+    """Drop the tracing section from the backend doc the project ships."""
+    doc = destination / BACKENDS[backend]["doc"]
+    original = doc.read_text()
+    if OTEL_ANCHOR not in original:
+        sys.exit(
+            f"{BACKENDS[backend]['doc']} no longer contains {OTEL_ANCHOR!r}, the "
+            f"anchor for its tracing section. --without-otel cannot tell what to "
+            f"drop, so refusing to ship a doc that may still mandate tracing."
+        )
+    doc.write_text(strip_section_containing(original, OTEL_ANCHOR))
+
+
 def copy_repo(
     destination: Path,
     backend: str,
     include_infra: bool,
+    include_otel: bool,
 ) -> None:
     if backend not in BACKENDS:
         sys.exit(f"Unknown backend '{backend}'. Choose one of: {', '.join(BACKENDS)}.")
@@ -179,6 +205,9 @@ def copy_repo(
     if include_infra:
         swap_migration_command(destination, backend)
 
+    if not include_otel:
+        strip_otel_section(destination, backend)
+
     # CLAUDE.md imports every doc this repo ships; drop the sections whose docs
     # were just excluded, so nothing imports a file that isn't there.
     dropped_docs = [spec["doc"] for spec in unused_backends]
@@ -190,17 +219,17 @@ def copy_repo(
         original = claude_md.read_text()
         stripped = original
         for doc in dropped_docs:
-            stripped = strip_section_importing(stripped, doc)
+            stripped = strip_section_containing(stripped, doc)
         if stripped != original:
             claude_md.write_text(stripped)
 
 
 EXAMPLES = """examples:
-  # FastAPI stack into a new folder, no AWS infrastructure
-  python scripts/copy_repo.py ~/dev/acme-api --backend python --no-infra
+  # FastAPI stack into a new folder, no AWS infrastructure, traced
+  python scripts/copy_repo.py ~/dev/acme-api --backend python --no-infra --with-otel
 
   # NestJS stack merged over an existing project, with the CDK stacks
-  python scripts/copy_repo.py ~/dev/acme-api --backend nestjs --infra
+  python scripts/copy_repo.py ~/dev/acme-api --backend nestjs --infra --without-otel
 
 every argument above is required — there are no defaults to fall back on.
 """
@@ -244,6 +273,25 @@ def main() -> None:
             "claude-review.yml copy either way"
         ),
     )
+    # Not a --otel/--no-otel pair: "with"/"without" reads as what the generated
+    # project has, which is what this flag decides.
+    otel = parser.add_mutually_exclusive_group(required=True)
+    otel.add_argument(
+        "--with-otel",
+        dest="otel",
+        action="store_true",
+        help=(
+            "Keep the tracing section of the backend instructions doc: the "
+            "OpenTelemetry console exporter for local debugging, the OTLP swap "
+            "for a deployed environment, and the span conventions"
+        ),
+    )
+    otel.add_argument(
+        "--without-otel",
+        dest="otel",
+        action="store_false",
+        help="Drop that section — no tracing guidance in the generated project",
+    )
     args = parser.parse_args()
 
     destination = args.destination.expanduser().resolve()
@@ -255,8 +303,10 @@ def main() -> None:
         destination,
         backend=args.backend,
         include_infra=args.infra,
+        include_otel=args.otel,
     )
-    print(f"Copied {REPO_ROOT} -> {destination} ({args.backend} backend)")
+    tracing = "with tracing" if args.otel else "no tracing"
+    print(f"Copied {REPO_ROOT} -> {destination} ({args.backend} backend, {tracing})")
 
 
 if __name__ == "__main__":

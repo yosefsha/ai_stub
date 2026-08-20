@@ -57,6 +57,12 @@ chosen by the required `--backend` flag of `scripts/create_remote_project.py`.
 It owns the `backend/` layout, the CI contract for that stack, and the
 container runtime. `ci.yml` matches whichever one is there.
 
+That doc also carries the tracing section, kept or dropped by the same script's
+`--with-otel` / `--without-otel` flag. A project generated with `--without-otel`
+has no tracing guidance anywhere; one generated with `--with-otel` instruments
+spans in the application and picks its exporter from the environment, so the
+local run prints them to stdout and needs no collector.
+
 What CI needs from the frontend, beyond the files existing:
 - **`npm run lint` must carry `--max-warnings 0`**, or the lint gate can never fail.
 - `npm run type-check` runs as its own gate, so a type error is reported as one.

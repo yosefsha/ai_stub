@@ -66,3 +66,73 @@ fake for tests. The full rule set lives in `.claude/agents/backend-engineer.md`.
 - Entrypoint: `uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4`. Port **8000** is what the ALB target group and the ECS security groups expect.
 - `GET /health` must return 200 — the ALB health check targets it.
 - Database migrations run as `alembic upgrade head`, both in CI and as the one-off ECS task in `deploy.yml`.
+
+## Tracing (OpenTelemetry)
+Spans are instrumented in the application; where they are sent is a deployment
+detail. Local runs and production emit the *same* spans — only the exporter
+differs, and it is chosen from the environment at startup, never by an `if` in
+a route.
+
+- Configure tracing once, at startup, before the first request. It lives in
+  `app/tracing.py` and is called from `main.py`.
+- With no collector configured, `ConsoleSpanExporter` prints each span to
+  stdout as JSON — parent/child nesting, durations and attributes, readable in
+  the terminal that is already open. This is the local debugging setup: no
+  container, no agent, no browser tab.
+- When `OTEL_EXPORTER_OTLP_ENDPOINT` is set, the OTLP exporter takes over.
+  That env var is the only difference between a laptop and ECS.
+
+```python
+# app/tracing.py
+import os
+
+from fastapi import FastAPI
+from opentelemetry import trace
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
+
+OTLP_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+SERVICE_NAME = os.getenv("OTEL_SERVICE_NAME", "backend")
+
+
+def configure_tracing(app: FastAPI) -> None:
+    exporter = OTLPSpanExporter() if OTLP_ENDPOINT else ConsoleSpanExporter()
+    provider = TracerProvider(resource=Resource.create({"service.name": SERVICE_NAME}))
+    provider.add_span_processor(BatchSpanProcessor(exporter))
+    trace.set_tracer_provider(provider)
+    FastAPIInstrumentor.instrument_app(app, excluded_urls="health")
+```
+
+`excluded_urls="health"` is not optional: the ALB probes `GET /health` every
+30 seconds per task, and those spans would outnumber the real traffic.
+
+Instrumenting your own code:
+
+```python
+tracer = trace.get_tracer(__name__)
+
+with tracer.start_as_current_span("parse_order") as span:
+    span.set_attribute("order.id", order_id)
+```
+
+- Span names are low-cardinality domain verbs (`parse_order`, `settle_invoice`).
+  Never interpolate an id into a name — ids are attributes.
+- Auto-instrument the boundaries you don't own (FastAPI, `httpx`, `psycopg`)
+  and write manual spans only for domain steps worth naming. A span per
+  private helper produces a waterfall nobody reads.
+- **Record the failure path.** `span.record_exception(exc)` and
+  `span.set_status(Status(StatusCode.ERROR))` in the handler that catches it,
+  or the trace of a request that 500'd looks fast and successful.
+- Traces complement structured logs, they do not replace them. Log the
+  `trace_id` so a log line leads to its trace.
+
+Dependencies: `opentelemetry-sdk`, `opentelemetry-instrumentation-fastapi`,
+`opentelemetry-exporter-otlp-proto-http`.
+
+For a waterfall UI locally, add `jaegertracing/all-in-one` to
+`docker-compose.yml` (ports `16686` for the UI, `4318` for OTLP/HTTP) and set
+`OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318`. One container, and the
+application code does not change.
