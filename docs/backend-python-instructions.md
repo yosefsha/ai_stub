@@ -25,7 +25,8 @@ backend/
 ```
 
 What CI needs from the backend, beyond the files existing:
-- `pip install -r backend/requirements-dev.txt` must pull in `pytest`, `httpx`, `psycopg` and `redis` — the last two are what the readiness check imports.
+- `pip install -r backend/requirements-dev.txt` must pull in `pytest`, `httpx` and `psycopg` — the last is what the readiness check imports.
+- CI runs Postgres only. If the backend uses Redis (or any other service), add it to `ci.yml` in the same change that introduces it — service container, its URL in `env`, and a check in the readiness step — and add its client (`redis`) to the requirements. Never add a service CI does not need.
 - `alembic upgrade head` must apply cleanly to an empty database.
 - **`pytest` must not skip.** A skipped test fails the build; fixtures that skip themselves when no database is present will trip it, so gate them on something CI satisfies.
 - `ruff check .` must pass. The version is pinned in the workflow, not in `requirements-dev.txt`, so the gate cannot drift under the codebase.

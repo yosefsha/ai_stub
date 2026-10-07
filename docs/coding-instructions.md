@@ -48,7 +48,7 @@ frontend/
   package-lock.json       # CI runs `npm ci`, which fails without it
   Dockerfile              # node:22-alpine base
   src/                    # See the frontend section below
-docker-compose.yml        # Local Postgres + Redis, same images as CI
+docker-compose.yml        # Local Postgres (+ Redis if used), same images as CI
 ```
 
 Exactly one backend instructions doc is present in a generated project —

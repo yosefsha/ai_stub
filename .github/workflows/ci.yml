@@ -34,9 +34,11 @@ jobs:
         # The service lives in backend/; a run from the repo root finds nothing.
         working-directory: backend
 
-    # Real Postgres and Redis, not mocks of them. Same images and the same
-    # health probes as docker-compose.yml, so a test that passes here passes
-    # against the local stack too.
+    # Real Postgres, not a mock of it. Same image and the same health probe as
+    # docker-compose.yml, so a test that passes here passes against the local
+    # stack too. Add a service here (Redis, a queue, …) only when the backend
+    # actually depends on it, together with its URL below and a readiness
+    # check in the wait step — never as a speculative default.
     services:
       postgres:
         image: postgres:16-alpine
@@ -52,22 +54,12 @@ jobs:
           --health-timeout 3s
           --health-retries 10
           --health-start-period 10s
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 10
 
     env:
-      # Point the app at the service containers. Both are published on the
+      # Point the app at the service container. It is published on the
       # runner's loopback interface because the job's steps run on the host,
       # not inside a job container.
       DATABASE_URL: postgresql://app:app@localhost:5432/app
-      REDIS_URL: redis://localhost:6379/0
       # ALLOWED_ORIGINS is deliberately left unset so the tests assert against
       # the application's built-in default origin.
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
@@ -102,7 +94,7 @@ jobs:
       - name: Lint (ruff)
         run: ruff check .
 
-      - name: Wait for Postgres and Redis to accept connections
+      - name: Wait for Postgres to accept connections
         # The container health checks gate the job start, but a green health
         # check on a published port is not proof the test process can reach it.
         # Connecting here turns "service missing" into a clear failure rather
@@ -114,7 +106,6 @@ jobs:
           import time
 
           import psycopg
-          import redis
 
           deadline = time.monotonic() + 60
 
@@ -127,17 +118,6 @@ jobs:
               except Exception as exc:
                   if time.monotonic() > deadline:
                       raise SystemExit(f"postgres never became reachable: {exc}")
-                  time.sleep(2)
-
-          while True:
-              try:
-                  client = redis.Redis.from_url(os.environ["REDIS_URL"], socket_connect_timeout=5)
-                  client.ping()
-                  print(f"redis ready: {client.info('server')['redis_version']}")
-                  break
-              except Exception as exc:
-                  if time.monotonic() > deadline:
-                      raise SystemExit(f"redis never became reachable: {exc}")
                   time.sleep(2)
           PY
 

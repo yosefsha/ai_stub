@@ -38,9 +38,11 @@ jobs:
         # The service lives in backend/; a run from the repo root finds nothing.
         working-directory: backend
 
-    # Real Postgres and Redis, not mocks of them. Same images and the same
-    # health probes as docker-compose.yml, so a test that passes here passes
-    # against the local stack too.
+    # Real Postgres, not a mock of it. Same image and the same health probe as
+    # docker-compose.yml, so a test that passes here passes against the local
+    # stack too. Add a service here (Redis, a queue, …) only when the backend
+    # actually depends on it, together with its URL below and a readiness
+    # check in the wait step — never as a speculative default.
     services:
       postgres:
         image: postgres:16-alpine
@@ -56,22 +58,12 @@ jobs:
           --health-timeout 3s
           --health-retries 10
           --health-start-period 10s
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 10
 
     env:
-      # Point the app at the service containers. Both are published on the
+      # Point the app at the service container. It is published on the
       # runner's loopback interface because the job's steps run on the host,
       # not inside a job container.
       DATABASE_URL: postgresql://app:app@localhost:5432/app
-      REDIS_URL: redis://localhost:6379/0
       # ALLOWED_ORIGINS is deliberately left unset so the tests assert against
       # the application's built-in default origin.
       NODE_ENV: test
@@ -107,17 +99,16 @@ jobs:
         # is incremental and near-free.
         run: npm run type-check
 
-      - name: Wait for Postgres and Redis to accept connections
+      - name: Wait for Postgres to accept connections
         # The container health checks gate the job start, but a green health
         # check on a published port is not proof the test process can reach it.
         # Connecting here turns "service missing" into a clear failure rather
         # than a confusing test error, and proves the tests below run against
-        # live servers. `pg` and `ioredis` are the app's own drivers, already
-        # installed by the step above.
+        # a live server. `pg` is the app's own driver, already installed by
+        # the step above.
         run: |
           node --input-type=module - <<'JS'
           import { Client } from 'pg';
-          import Redis from 'ioredis';
 
           const deadline = Date.now() + 60_000;
           const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -133,22 +124,6 @@ jobs:
             } catch (err) {
               await client.end().catch(() => {});
               if (Date.now() > deadline) throw new Error(`postgres never became reachable: ${err}`);
-              await sleep(2000);
-            }
-          }
-
-          for (;;) {
-            const redis = new Redis(process.env.REDIS_URL, { connectTimeout: 5000, lazyConnect: true, maxRetriesPerRequest: 1 });
-            try {
-              await redis.connect();
-              await redis.ping();
-              const info = await redis.info('server');
-              console.log(`redis ready: ${/redis_version:(\S+)/.exec(info)?.[1]}`);
-              redis.disconnect();
-              break;
-            } catch (err) {
-              redis.disconnect();
-              if (Date.now() > deadline) throw new Error(`redis never became reachable: ${err}`);
               await sleep(2000);
             }
           }

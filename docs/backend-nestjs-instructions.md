@@ -39,7 +39,8 @@ Unit specs (`*.spec.ts`) sit next to the file they cover under `src/`; end-to-en
 specs (`*.e2e-spec.ts`) live in `test/`.
 
 What CI needs from the backend, beyond the files existing:
-- `npm ci` must install `pg` and `ioredis` — they are what the readiness check imports before the suite runs.
+- `npm ci` must install `pg` — it is what the readiness check imports before the suite runs.
+- CI runs Postgres only. If the backend uses Redis (or any other service), add it to `ci.yml` in the same change that introduces it — service container, its URL in `env`, and a check in the readiness step — and add its client (`ioredis`) to the dependencies. Never add a service CI does not need.
 - `npm run migration:run` must apply cleanly to an empty database.
 - **The suite must not skip.** A skipped or `todo` test fails the build; specs that skip themselves when no database is present will trip it, so gate them on something CI satisfies.
 - `npm run lint` must carry `--max-warnings 0`, or the lint gate can never fail — `typescript-eslint`'s recommended preset ships most rules as warnings.
@@ -58,7 +59,7 @@ What CI needs from the backend, beyond the files existing:
 ## Configuration
 - Use `@nestjs/config` with `isGlobal: true` and a typed `configuration.ts` factory. Read config through `ConfigService`, never `process.env` outside that factory.
 - Validate the environment at startup with a schema (`validation.ts`); an invalid env must fail the boot, not surface as an undefined at the first request.
-- Provide sensible defaults so `npm run start:dev` works with no env vars set: `PORT=8000`, `DATABASE_URL=postgresql://app:app@localhost:5432/app`, `REDIS_URL=redis://localhost:6379/0`.
+- Provide sensible defaults so `npm run start:dev` works with no env vars set: `PORT=8000`, `DATABASE_URL=postgresql://app:app@localhost:5432/app` (plus `REDIS_URL=redis://localhost:6379/0` if the project uses Redis).
 - Secrets come from the environment (Secrets Manager in ECS) — never from a committed `.env`.
 
 ## Data sources go behind a port interface
@@ -72,7 +73,7 @@ return types and its own error types. One implementation per source under
 ## Testing
 - `jest` as the runner, `supertest` for HTTP-level tests.
 - Unit tests construct the service under test directly (`new OrderService(fake)`) — reach for `Test.createTestingModule` only when Nest's DI is what's under test.
-- E2E specs boot the real `AppModule` against the real Postgres and Redis containers, with the same global pipes as `main.ts`, and assert on status codes and body shapes.
+- E2E specs boot the real `AppModule` against the real Postgres container (and Redis, if the project uses it), with the same global pipes as `main.ts`, and assert on status codes and body shapes.
 - Substitute the in-memory fake through `overrideProvider(TOKEN)`; do not mock the driver.
 - Test both success paths and error/edge cases.
 - Run a single test: `npm test -- src/orders/order.service.spec.ts -t "rejects a duplicate"`
